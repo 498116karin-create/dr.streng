@@ -16,6 +16,12 @@
   .chip { font:inherit; font-size:13px; padding:7px 12px; border:1px solid rgba(255,160,50,.45); border-radius:999px; color:var(--amber); background:rgba(7,4,2,.6); pointer-events:auto; font-variant-numeric:tabular-nums; }
   .chip.on { background:var(--amber); color:var(--ink); border-color:var(--amber); }
   #fps { pointer-events:none; white-space:nowrap; }
+  #ctl { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 54px); display:flex; gap:8px; justify-content:center; }
+  .chip.rec { background:#c0392b; color:#fff; border-color:#c0392b; }
+  #panel { position:fixed; left:12px; right:12px; bottom:calc(env(safe-area-inset-bottom,0px) + 102px); max-width:360px; margin:0 auto; background:rgba(7,4,2,.88); border:1px solid rgba(255,160,50,.45); border-radius:14px; padding:14px; display:grid; gap:12px; font-size:14px; }
+  #panel[hidden] { display:none; }
+  #panel label { display:grid; gap:6px; }
+  #panel input { width:100%; accent-color:var(--amber); }
   #status { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 18px); text-align:center; font-size:16px; padding:0 16px; text-shadow:0 0 10px #000; }
   #start { position:fixed; inset:0; display:flex; flex-direction:column; gap:16px; align-items:center; justify-content:center; background:var(--ink); z-index:5; text-align:center; padding:24px; }
   #start h1 { font-size:28px; font-weight:600; }
@@ -28,10 +34,19 @@
 <video id="v" playsinline muted></video>
 <canvas id="fx"></canvas>
 <div id="hud"><div id="pw"></div><div class="chip" id="fps">-- fps</div></div>
+<div id="panel" hidden>
+  <label><span>ความไวการกำมือ: <b id="vFist"></b></span><input type="range" id="rFist" min="1" max="10" step="1"></label>
+  <label><span>เวลาค้างนิ้วเพื่อเลือกเวท: <b id="vHold"></b></span><input type="range" id="rHold" min="2" max="9" step="0.5"></label>
+</div>
+<div id="ctl">
+  <button class="chip" id="bSet">ตั้งค่า</button>
+  <button class="chip" id="bSnd">เสียง: เปิด</button>
+  <button class="chip" id="bRec">● บันทึก</button>
+</div>
 <div id="status">กำมือเพื่อร่ายเวท</div>
 <div id="start">
   <h1>Mystic Arts</h1>
-  <p>ชู 1–4 นิ้ว (พับนิ้วโป้ง) ค้างไว้ครึ่งวินาทีเพื่อเลือกเวท แล้วกำมือเพื่อร่าย แบมือเพื่อหยุด<br>1 Eldritch · 2 Sling Ring · 3 Mirror Dimension · 4 Eye of Agamotto</p>
+  <p>ชู 1–4 นิ้ว (พับนิ้วโป้ง) ค้างไว้ครึ่งวินาทีเพื่อเลือกเวท แล้วกำมือเพื่อร่าย แบมือเพื่อหยุด<br>1 Eldritch · 2 Sling Ring · 3 Mirror Dimension · 4 Eye of Agamotto<br>กำสองมือชิดกันเพื่อเปิดประตูมิติขนาดใหญ่ (ดึงมือห่างเพื่อขยาย)</p>
   <button id="go">เปิดกล้อง</button>
 </div>
 
@@ -53,13 +68,98 @@ const POW = [
   { n: 'Eye of Agamotto', k: '4 Time' }
 ];
 let sel = 0;
-const pw = document.getElementById('pw');
+const cfg = { fist: 4, hold: 4.5, muted: false };
+try { Object.assign(cfg, JSON.parse(localStorage.getItem('mysticCfg') || '{}')); } catch (e) {}
+const saveCfg = () => { try { localStorage.setItem('mysticCfg', JSON.stringify(cfg)); } catch (e) {} };
+const fistR = () => 0.98 + cfg.fist * 0.035;   // higher = easier to register a fist
+const holdMs = () => cfg.hold * 100;
+const pw = document.getElementById('pw'), bSet = document.getElementById('bSet'), bSnd = document.getElementById('bSnd'), bRec = document.getElementById('bRec');
+const panel = document.getElementById('panel'), rFist = document.getElementById('rFist'), rHold = document.getElementById('rHold');
 POW.forEach((p, i) => {
   const b = document.createElement('button'); b.className = 'chip'; b.textContent = p.k;
-  b.onclick = () => { sel = i; chips(); }; pw.appendChild(b);
+  b.onclick = () => setSel(i); pw.appendChild(b);
 });
 function chips() { [...pw.children].forEach((b, i) => b.classList.toggle('on', i === sel)); }
+function setSel(i) { if (i === sel) return; sel = i; chips(); sfxSwitch(); }
 chips();
+
+// ---------- sound (synthesized with WebAudio, no files) ----------
+let AC = null, master = null, recDest = null, lastSfx = 0;
+function audioInit() {
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)(); AC.resume();
+    master = AC.createGain(); master.gain.value = .5; master.connect(AC.destination);
+    recDest = AC.createMediaStreamDestination(); master.connect(recDest);
+  } catch (e) { AC = null; }
+}
+function tone(f0, f1, dur, type = 'sine', vol = .25, delay = 0) {
+  if (!AC || cfg.muted) return;
+  const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime + delay;
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .02); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + .05);
+}
+function noise(dur, f0, f1, vol = .3) {
+  if (!AC || cfg.muted) return;
+  const n = Math.floor(AC.sampleRate * dur), buf = AC.createBuffer(1, n, AC.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 2;
+  const t = AC.currentTime; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = AC.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(master); src.start(t);
+}
+const CAST = [
+  () => { noise(.7, 300, 2500, .5); tone(110, 440, .6, 'sawtooth', .16); },
+  () => { noise(1, 200, 3500, .6); tone(180, 900, .9, 'triangle', .2); tone(1200, 2400, .5, 'sine', .08, .3); },
+  () => { [880, 1320, 1760, 2217].forEach((f, i) => tone(f, f * 1.01, .5, 'sine', .14, i * .07)); noise(.4, 3000, 6000, .2); },
+  () => { tone(700, 90, .9, 'sine', .25); [0, .12, .24, .36].forEach(d => tone(1800, 1700, .05, 'square', .06, d)); }
+];
+function sfxCast() { const n = performance.now(); if (n - lastSfx < 300) return; lastSfx = n; CAST[sel](); }
+function sfxSwitch() { tone(900, 1400, .08, 'triangle', .2); tone(1400, 2000, .08, 'sine', .1, .07); }
+function sfxClose() { tone(500, 120, .35, 'sine', .18); noise(.3, 2000, 300, .18); }
+function sfxTwin() { lastSfx = performance.now(); noise(1.2, 150, 4000, .7); tone(70, 220, 1, 'sawtooth', .22); [660, 990, 1320].forEach((f, i) => tone(f, f * 1.02, .6, 'sine', .12, .2 + i * .1)); }
+
+// ---------- settings UI ----------
+rFist.value = cfg.fist; rHold.value = cfg.hold;
+const showSet = () => { document.getElementById('vFist').textContent = cfg.fist; document.getElementById('vHold').textContent = (cfg.hold / 10).toFixed(2) + ' วิ'; bSnd.textContent = cfg.muted ? 'เสียง: ปิด' : 'เสียง: เปิด'; };
+showSet();
+bSet.onclick = () => { panel.hidden = !panel.hidden; };
+bSnd.onclick = () => { cfg.muted = !cfg.muted; saveCfg(); showSet(); };
+rFist.oninput = () => { cfg.fist = +rFist.value; saveCfg(); showSet(); };
+rHold.oninput = () => { cfg.hold = +rHold.value; saveCfg(); showSet(); };
+
+// ---------- recording (camera + effects + sound -> video file) ----------
+let recOn = false, recC = null, rc = null, mr = null, chunks = [], recT0 = 0, rW = 0, rH = 0;
+function startRec() {
+  if (!window.MediaRecorder) { alert('เบราว์เซอร์นี้ไม่รองรับการบันทึก'); return; }
+  const sc = Math.min(1, 1280 / Math.max(W, H)); rW = Math.round(W * sc); rH = Math.round(H * sc);
+  recC = document.createElement('canvas'); recC.width = rW; recC.height = rH; rc = recC.getContext('2d');
+  const stream = recC.captureStream(60);
+  if (recDest) recDest.stream.getAudioTracks().forEach(tr => stream.addTrack(tr));
+  const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find(m => MediaRecorder.isTypeSupported(m));
+  if (!mime) { alert('เบราว์เซอร์นี้ไม่รองรับการบันทึก'); return; }
+  chunks = []; mr = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6e6 });
+  mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    const url = URL.createObjectURL(new Blob(chunks, { type: mime })), a = document.createElement('a');
+    a.href = url; a.download = `mystic-arts-${Date.now()}.${mime.includes('mp4') ? 'mp4' : 'webm'}`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+  mr.start(1000); recOn = true; recT0 = performance.now(); bRec.classList.add('rec'); bRec.textContent = '■ หยุด 0:00';
+}
+function stopRec() { recOn = false; if (mr && mr.state !== 'inactive') mr.stop(); bRec.classList.remove('rec'); bRec.textContent = '● บันทึก'; }
+bRec.onclick = () => (recOn ? stopRec() : startRec());
+function recFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  rc.fillStyle = '#070402'; rc.fillRect(0, 0, rW, rH);
+  if (vw) {
+    const k = Math.max(rW / vw, rH / vh), dw = vw * k, dh = vh * k;
+    rc.save(); rc.translate(rW, 0); rc.scale(-1, 1); rc.filter = 'saturate(.5) brightness(.5) sepia(.4)';
+    rc.drawImage(video, (rW - dw) / 2, (rH - dh) / 2, dw, dh); rc.restore();
+  }
+  rc.filter = 'none'; rc.drawImage(cv, 0, 0, rW, rH);
+}
 
 const C = '255,150,40', HOT = '255,225,160', G = '110,255,170', GH = '215,255,230';
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -71,7 +171,7 @@ function toScreen(p) {
 }
 function analyze(lm) {
   const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
-  const count = tips.filter((t, i) => dist(lm[t], lm[0]) > dist(lm[pips[i]], lm[0]) * 1.12).length;
+  const count = tips.filter((t, i) => dist(lm[t], lm[0]) > dist(lm[pips[i]], lm[0]) * fistR()).length;
   const thumb = dist(lm[4], lm[17]) > dist(lm[3], lm[17]) * 1.15;
   const ids = [0, 5, 9, 13, 17];
   const c = toScreen({ x: ids.reduce((s, i) => s + lm[i].x, 0) / 5, y: ids.reduce((s, i) => s + lm[i].y, 0) / 5 });
@@ -80,6 +180,7 @@ function analyze(lm) {
 
 const slots = [0, 1].map(() => ({ x: 0, y: 0, size: 0, tx: 0, ty: 0, tsize: 0, open: 0, seen: -1e9, lastFist: -1e9, trail: [] }));
 let detectCount = 0, hold = { n: 0, t: 0 };
+const twin = { x: 0, y: 0, r: 0, open: 0, on: false };
 
 const handsModel = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
 handsModel.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
@@ -97,7 +198,7 @@ handsModel.onResults(r => {
   const h0 = hs.find(h => !h.fist && !h.thumb && h.count >= 1 && h.count <= 4);
   if (h0) {
     if (hold.n !== h0.count) hold = { n: h0.count, t: now };
-    else if (now - hold.t > 450 && sel !== h0.count - 1) { sel = h0.count - 1; chips(); }
+    else if (now - hold.t > holdMs()) setSel(h0.count - 1);
   } else hold = { n: 0, t: now };
 });
 
@@ -254,6 +355,7 @@ function frame(now) {
   if (now - fpsT >= 500) {
     fpsEl.textContent = `${Math.round(frames / ((now - fpsT) / 1000))} fps · ตรวจจับ ${Math.round(detectCount / ((now - detT) / 1000))}`;
     frames = 0; fpsT = now; detectCount = 0; detT = now;
+    if (recOn) { const sec = Math.floor((now - recT0) / 1000); bRec.textContent = `■ หยุด ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
   }
   ctx.clearRect(0, 0, W, H);
   const kPos = 1 - Math.exp(-dt * 28), kSize = 1 - Math.exp(-dt * 18);
@@ -261,11 +363,36 @@ function frame(now) {
 
   for (const s of slots) {
     const visible = now - s.seen < 250, fist = visible && now - s.lastFist < 150;
+    s.fist = fist;
     if (visible) anyHand = true; if (fist) anyOpen = true;
     s.x += (s.tx - s.x) * kPos; s.y += (s.ty - s.y) * kPos; s.size += (s.tsize - s.size) * kSize;
     s.open += ((fist ? 1 : 0) - s.open) * (1 - Math.exp(-dt * (fist ? 12 : 20)));
     if (s.open < .005) s.open = 0;
     if (s.open > .3) { s.trail.push({ x: s.x, y: s.y }); if (s.trail.length > 26) s.trail.shift(); } else if (s.trail.length) s.trail.shift();
+  }
+  // two fists close together -> giant portal; pull apart to enlarge
+  const [ha, hb] = slots, avg = (ha.size + hb.size) / 2, gap = Math.hypot(ha.x - hb.x, ha.y - hb.y);
+  const twinNow = ha.fist && hb.fist && avg > 0 && gap < avg * 5;
+  if (twinNow) {
+    const mx = (ha.x + hb.x) / 2, my = (ha.y + hb.y) / 2, r = Math.min(Math.max(gap * .8, avg * 4), Math.min(W, H) * .48);
+    if (twin.open < .01) { twin.x = mx; twin.y = my; twin.r = r; }
+    twin.x += (mx - twin.x) * kPos; twin.y += (my - twin.y) * kPos; twin.r += (r - twin.r) * kSize;
+  }
+  twin.open += ((twinNow ? 1 : 0) - twin.open) * (1 - Math.exp(-dt * (twinNow ? 10 : 18)));
+  if (twin.open < .005) twin.open = 0;
+  if (twinNow && !twin.on) sfxTwin();
+  twin.on = twinNow;
+  for (const s of slots) {
+    if (s.fist && !s.cast && !twinNow && twin.open < .05) sfxCast();
+    if (!s.fist && s.cast && !twinNow) sfxClose();
+    s.cast = s.fist;
+  }
+  if (twin.open > 0) {
+    const e = ease(twin.open), R = twin.r * e;
+    ctx.globalCompositeOperation = 'lighter';
+    drawPortal(twin, t, e, R); ringSparks(twin, R * 1.02, Math.round(20 * e));
+    ctx.globalCompositeOperation = 'source-over';
+  } else for (const s of slots) {
     const e = ease(s.open); if (!e) continue;
     ctx.globalCompositeOperation = 'lighter';
     if (sel === 0) { const R = s.size * 2.4 * e; drawWeapons(s, t, R, e); drawMandala(s, t, R, e); ringSparks(s, R, Math.round(5 * e)); }
@@ -286,12 +413,13 @@ function frame(now) {
   }
   sparks = kept; ctx.globalCompositeOperation = 'source-over';
 
-  statusEl.textContent = anyOpen ? POW[sel].n : anyHand ? `เลือก: ${POW[sel].n} · กำมือเพื่อร่าย` : 'ยื่นมือเข้ามาในกล้อง';
+  if (recOn) recFrame();
+  statusEl.textContent = anyOpen ? (twin.open > .3 ? 'Sling Ring ขนาดใหญ่' : POW[sel].n) : anyHand ? `เลือก: ${POW[sel].n} · กำมือเพื่อร่าย` : 'ยื่นมือเข้ามาในกล้อง';
   requestAnimationFrame(frame);
 }
 
 document.getElementById('go').onclick = async () => {
-  const btn = document.getElementById('go'); btn.disabled = true; btn.textContent = 'กำลังโหลด...';
+  audioInit(); const btn = document.getElementById('go'); btn.disabled = true; btn.textContent = 'กำลังโหลด...';
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 60 } }, audio: false
