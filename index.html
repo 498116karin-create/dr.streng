@@ -56,8 +56,9 @@
 const video = document.getElementById('v'), cv = document.getElementById('fx'), ctx = cv.getContext('2d');
 const statusEl = document.getElementById('status'), fpsEl = document.getElementById('fps');
 let W = 0, H = 0;
+let rs = 1; // render scale, lowered automatically if fps drops
 function resize() {
-  const d = Math.min(devicePixelRatio || 1, 2);
+  const d = Math.min(devicePixelRatio || 1, 1.5) * rs;
   W = innerWidth; H = innerHeight; cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0);
 }
 addEventListener('resize', resize); resize();
@@ -69,8 +70,9 @@ const POW = [
   { n: 'Eye of Agamotto', k: '4 Time' }
 ];
 let sel = 0;
-const cfg = { fist: 4, hold: 4.5, muted: false, hq: true };
+const cfg = { fist: 4, hold: 4.5, muted: false, hq: false };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem('mysticCfg') || '{}')); } catch (e) {}
+if (cfg.v !== 2) { cfg.hq = false; cfg.v = 2; }
 const saveCfg = () => { try { localStorage.setItem('mysticCfg', JSON.stringify(cfg)); } catch (e) {} };
 const fistR = () => 0.98 + cfg.fist * 0.035;   // higher = easier to register a fist
 const holdMs = () => cfg.hold * 100;
@@ -266,11 +268,18 @@ function polygon(n, r, step) {
     i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
   }
 }
-function drawCover() { // camera frame, mirrored, same crop as the <video>
-  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
-  const k = Math.max(W / vw, H / vh), dw = vw * k, dh = vh * k;
-  ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1); ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh); ctx.restore();
+const vc = document.createElement('canvas'), vcx = vc.getContext('2d');
+let vcFrame = -1, frameNo = 0;
+function snap() { // camera frame, mirrored + cropped like the <video>, copied once per frame at reduced size
+  if (vcFrame === frameNo) return true;
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return false;
+  const w = Math.max(2, Math.round(W * .6)), h = Math.max(2, Math.round(H * .6));
+  if (vc.width !== w || vc.height !== h) { vc.width = w; vc.height = h; }
+  const k = Math.max(w / vw, h / vh), dw = vw * k, dh = vh * k;
+  vcx.save(); vcx.translate(w, 0); vcx.scale(-1, 1); vcx.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh); vcx.restore();
+  vcFrame = frameNo; return true;
 }
+function drawCover() { if (snap()) ctx.drawImage(vc, 0, 0, W, H); }
 function glow(x, y, r, c, a) {
   const g = ctx.createRadialGradient(x, y, 0, x, y, r);
   g.addColorStop(0, `rgba(${c},${a})`); g.addColorStop(1, `rgba(${c},0)`);
@@ -284,7 +293,7 @@ function halo(x, y, r, a) {
   ctx.globalCompositeOperation = 'lighter';
 }
 let sparks = [];
-function spark(x, y, vx, vy, decay, g, grav) { if (sparks.length < 500) sparks.push({ x, y, px: x, py: y, vx, vy, life: 1, decay, g, grav }); }
+function spark(x, y, vx, vy, decay, g, grav) { if (sparks.length < 260) sparks.push({ x, y, px: x, py: y, vx, vy, life: 1, decay, g, grav }); }
 function ringSparks(s, R, n) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * 6.283, r = R * (.88 + Math.random() * .12), sp = 2 + Math.random() * 5, out = 1 + Math.random() * 3;
@@ -409,35 +418,38 @@ function drawTime(s, t, R, e) {
 // MediaPipe gives joints, not a cutout, so build a hand silhouette from the bones + palm and re-draw the camera through it.
 const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 const PALM = [0, 1, 5, 9, 13, 17];
-const hm = document.createElement('canvas'), hc = hm.getContext('2d');
 function drawHandsFront(now) {
   const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
-  if (hm.width !== W || hm.height !== H) { hm.width = W; hm.height = H; }
-  hc.globalCompositeOperation = 'source-over'; hc.clearRect(0, 0, W, H);
-  hc.strokeStyle = '#fff'; hc.fillStyle = '#fff'; hc.lineCap = 'round'; hc.lineJoin = 'round';
-  let any = false;
+  ctx.save(); ctx.beginPath(); let any = false;
   for (const s of slots) {
     if (!s.pts || now - s.seen > 250) continue;
-    any = true; const P = s.pts;
-    hc.lineWidth = s.size * .36; hc.beginPath();
-    BONES.forEach(([a, b]) => { hc.moveTo(P[a].x, P[a].y); hc.lineTo(P[b].x, P[b].y); });
-    hc.stroke();
-    hc.beginPath(); PALM.forEach((i, k) => k ? hc.lineTo(P[i].x, P[i].y) : hc.moveTo(P[i].x, P[i].y)); hc.closePath(); hc.fill(); hc.stroke();
+    any = true; const P = s.pts, r = s.size * .18;
+    for (const [a, b] of BONES) for (let i = 0; i <= 4; i++) {
+      const x = P[a].x + (P[b].x - P[a].x) * i / 4, y = P[a].y + (P[b].y - P[a].y) * i / 4;
+      ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.2832);
+    }
+    let area = 0; PALM.forEach((i, k) => { const j = PALM[(k + 1) % PALM.length]; area += P[i].x * P[j].y - P[j].x * P[i].y; });
+    (area >= 0 ? PALM : [...PALM].reverse()).forEach((i, k) => k ? ctx.lineTo(P[i].x, P[i].y) : ctx.moveTo(P[i].x, P[i].y));
+    ctx.closePath();
   }
-  if (!any) return;
-  hc.globalCompositeOperation = 'source-in';
+  if (!any) { ctx.restore(); return; }
+  ctx.clip();
   const k = Math.max(W / vw, H / vh), dw = vw * k, dh = vh * k;
-  hc.save(); hc.translate(W, 0); hc.scale(-1, 1);
-  hc.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh); hc.restore();
-  ctx.drawImage(hm, 0, 0, W, H);
+  ctx.translate(W, 0); ctx.scale(-1, 1); ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  ctx.restore();
 }
 
-let last = performance.now(), frames = 0, fpsT = last, detT = last;
+let last = performance.now(), frames = 0, fpsT = last, detT = last, lastScale = 0, goodN = 0;
 function frame(now) {
   const dt = Math.min((now - last) / 1000, .1); last = now;
-  const t = now / 1000; frames++;
+  const t = now / 1000; frames++; frameNo++;
   if (now - fpsT >= 500) {
-    fpsEl.textContent = `${Math.round(frames / ((now - fpsT) / 1000))} fps · ตรวจจับ ${Math.round(detectCount / ((now - detT) / 1000))}`;
+    const fpsNow = frames / ((now - fpsT) / 1000);
+    fpsEl.textContent = `${Math.round(fpsNow)} fps · ตรวจจับ ${Math.round(detectCount / ((now - detT) / 1000))} · ${Math.round(rs * 100)}%`;
+    if (now - lastScale > 1500) {
+      if (fpsNow < 54 && rs > .5) { rs = Math.max(.5, rs - .15); resize(); lastScale = now; goodN = 0; }
+      else if (fpsNow >= 58 && rs < 1 && ++goodN >= 6) { rs = Math.min(1, rs + .1); resize(); lastScale = now; goodN = 0; }
+    }
     frames = 0; fpsT = now; detectCount = 0; detT = now;
     if (recOn) { const sec = Math.floor((now - recT0) / 1000); bRec.textContent = `■ หยุด ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
   }
@@ -513,9 +525,14 @@ document.getElementById('go').onclick = async () => {
     video.srcObject = stream; await video.play();
     document.getElementById('start').remove();
     requestAnimationFrame(frame);
-    let busy = false;
+    let busy = false, lastSend = 0, infMs = 12;
     const loop = async () => {
-      if (!busy && video.readyState >= 2) { busy = true; try { await handsModel.send({ image: video }); } catch (e) { console.error(e); } busy = false; }
+      const n = performance.now();
+      if (!busy && video.readyState >= 2 && n - lastSend >= Math.max(33, infMs * 2)) {
+        busy = true; lastSend = n;
+        try { await handsModel.send({ image: video }); } catch (e) { console.error(e); }
+        infMs += (performance.now() - n - infMs) * .2; busy = false;
+      }
       requestAnimationFrame(loop);
     };
     loop();
