@@ -9,7 +9,7 @@
   * { box-sizing:border-box; margin:0; }
   html, body { height:100%; background:var(--ink); color:var(--amber); font-family:system-ui, "Noto Sans Thai", sans-serif; overflow:hidden; }
   video, canvas { position:fixed; inset:0; width:100%; height:100%; }
-  video { object-fit:cover; transform:scaleX(-1); filter:saturate(.5) brightness(.5) sepia(.4); }
+  video { object-fit:cover; transform:scaleX(-1); }
   #fx { pointer-events:none; }
   #hud { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 0; display:flex; justify-content:space-between; align-items:flex-start; gap:8px; pointer-events:none; }
   #pw { display:flex; flex-wrap:wrap; gap:6px; }
@@ -37,6 +37,7 @@
 <div id="panel" hidden>
   <label><span>ความไวการกำมือ: <b id="vFist"></b></span><input type="range" id="rFist" min="1" max="10" step="1"></label>
   <label><span>เวลาค้างนิ้วเพื่อเลือกเวท: <b id="vHold"></b></span><input type="range" id="rHold" min="2" max="9" step="0.5"></label>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="cHq" style="width:auto"><span>โหมดแม่นยำสูง (เฟรมเรตอาจลดลง)</span></label>
 </div>
 <div id="ctl">
   <button class="chip" id="bSet">ตั้งค่า</button>
@@ -68,7 +69,7 @@ const POW = [
   { n: 'Eye of Agamotto', k: '4 Time' }
 ];
 let sel = 0;
-const cfg = { fist: 4, hold: 4.5, muted: false };
+const cfg = { fist: 4, hold: 4.5, muted: false, hq: true };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem('mysticCfg') || '{}')); } catch (e) {}
 const saveCfg = () => { try { localStorage.setItem('mysticCfg', JSON.stringify(cfg)); } catch (e) {} };
 const fistR = () => 0.98 + cfg.fist * 0.035;   // higher = easier to register a fist
@@ -154,6 +155,8 @@ function sfxTwin() { lastSfx = performance.now(); noise(.8, 150, 3000, .5); tone
 rFist.value = cfg.fist; rHold.value = cfg.hold;
 const showSet = () => { document.getElementById('vFist').textContent = cfg.fist; document.getElementById('vHold').textContent = (cfg.hold / 10).toFixed(2) + ' วิ'; bSnd.textContent = cfg.muted ? 'เสียง: ปิด' : 'เสียง: เปิด'; };
 showSet();
+const cHq = document.getElementById('cHq'); cHq.checked = cfg.hq;
+cHq.onchange = () => { cfg.hq = cHq.checked; saveCfg(); handsModel.setOptions({ modelComplexity: cfg.hq ? 1 : 0 }); };
 bSet.onclick = () => { panel.hidden = !panel.hidden; };
 bSnd.onclick = () => { cfg.muted = !cfg.muted; if (cfg.muted) stopSample(.05); saveCfg(); showSet(); };
 rFist.oninput = () => { cfg.fist = +rFist.value; saveCfg(); showSet(); };
@@ -185,10 +188,10 @@ function recFrame() {
   rc.fillStyle = '#070402'; rc.fillRect(0, 0, rW, rH);
   if (vw) {
     const k = Math.max(rW / vw, rH / vh), dw = vw * k, dh = vh * k;
-    rc.save(); rc.translate(rW, 0); rc.scale(-1, 1); rc.filter = 'saturate(.5) brightness(.5) sepia(.4)';
+    rc.save(); rc.translate(rW, 0); rc.scale(-1, 1);
     rc.drawImage(video, (rW - dw) / 2, (rH - dh) / 2, dw, dh); rc.restore();
   }
-  rc.filter = 'none'; rc.drawImage(cv, 0, 0, rW, rH);
+  rc.drawImage(cv, 0, 0, rW, rH);
 }
 
 const C = '255,150,40', HOT = '255,225,160', G = '110,255,170', GH = '215,255,230';
@@ -201,28 +204,46 @@ function toScreen(p) {
 }
 function analyze(lm) {
   const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
-  const count = tips.filter((t, i) => dist(lm[t], lm[0]) > dist(lm[pips[i]], lm[0]) * fistR()).length;
-  const thumb = dist(lm[4], lm[17]) > dist(lm[3], lm[17]) * 1.15;
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const q = lm.map(p => ({ x: p.x * vw, y: p.y * vh, z: p.z * vw }));
+  const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  const count = tips.filter((t, i) => d3(q[t], q[0]) > d3(q[pips[i]], q[0]) * fistR()).length;
+  const thumb = d3(q[4], q[17]) > d3(q[3], q[17]) * 1.15;
   const ids = [0, 5, 9, 13, 17];
   const c = toScreen({ x: ids.reduce((s, i) => s + lm[i].x, 0) / 5, y: ids.reduce((s, i) => s + lm[i].y, 0) / 5 });
-  return { fist: count === 0, count, thumb, c, size: dist(toScreen(lm[0]), toScreen(lm[9])) };
+  return { fist: count === 0, count, thumb, c, size: dist(toScreen(lm[0]), toScreen(lm[9])), pts: lm.map(toScreen) };
 }
 
-const slots = [0, 1].map(() => ({ x: 0, y: 0, size: 0, tx: 0, ty: 0, tsize: 0, open: 0, seen: -1e9, lastFist: -1e9, trail: [] }));
+const slots = [0, 1].map(() => ({ x: 0, y: 0, size: 0, tx: 0, ty: 0, tsize: 0, open: 0, seen: -1e9, lastFist: -1e9, fc: 0, trail: [] }));
 let detectCount = 0, hold = { n: 0, t: 0 };
 const twin = { x: 0, y: 0, r: 0, open: 0, on: false };
 
+// keep each physical hand in the same slot (nearest to where it was) so effects never swap hands
+function assign(hs, now) {
+  const [a, b] = slots, act = x => now - x.seen < 400;
+  const cost = (h, x) => (act(x) ? Math.hypot(h.c.x - x.tx, h.c.y - x.ty) : 0);
+  if (hs.length === 2) {
+    const [h0, h1] = hs;
+    return cost(h0, a) + cost(h1, b) <= cost(h0, b) + cost(h1, a) ? [[h0, a], [h1, b]] : [[h0, b], [h1, a]];
+  }
+  if (hs.length === 1) {
+    const h = hs[0];
+    const x = act(a) && act(b) ? (cost(h, a) <= cost(h, b) ? a : b) : act(b) && !act(a) ? b : a;
+    return [[h, x]];
+  }
+  return [];
+}
 const handsModel = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
-handsModel.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+handsModel.setOptions({ maxNumHands: 2, modelComplexity: cfg.hq ? 1 : 0, minDetectionConfidence: 0.7, minTrackingConfidence: 0.6 });
 handsModel.onResults(r => {
   detectCount++;
   const now = performance.now();
   const hs = (r.multiHandLandmarks || []).slice(0, 2).map(analyze);
-  hs.forEach((h, i) => {
-    const s = slots[i];
+  assign(hs, now).forEach(([h, s]) => {
     if (now - s.seen > 400) { s.x = h.c.x; s.y = h.c.y; s.size = h.size; }
-    s.tx = h.c.x; s.ty = h.c.y; s.tsize = h.size; s.seen = now;
-    if (h.fist) s.lastFist = now;
+    s.tx = h.c.x; s.ty = h.c.y; s.tsize = h.size; s.seen = now; s.pts = h.pts;
+    s.fc = h.fist ? s.fc + 1 : 0;           // a fist must show in 2 detections in a row (filters flicker)
+    if (s.fc >= 2) s.lastFist = now;
   });
   // choose power: 1-4 fingers, thumb tucked, held ~0.45s (open palm / fist never switch)
   const h0 = hs.find(h => !h.fist && !h.thumb && h.count >= 1 && h.count <= 4);
@@ -256,6 +277,12 @@ function glow(x, y, r, c, a) {
   ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
 }
 
+function halo(x, y, r, a) {
+  const g = ctx.createRadialGradient(x, y, r * .2, x, y, r * 1.4);
+  g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 1.4, 0, 7); ctx.fill();
+  ctx.globalCompositeOperation = 'lighter';
+}
 let sparks = [];
 function spark(x, y, vx, vy, decay, g, grav) { if (sparks.length < 500) sparks.push({ x, y, px: x, py: y, vx, vy, life: 1, decay, g, grav }); }
 function ringSparks(s, R, n) {
@@ -378,6 +405,33 @@ function drawTime(s, t, R, e) {
   ctx.restore();
 }
 
+// ---------- keep the hands in front of the giant portal ----------
+// MediaPipe gives joints, not a cutout, so build a hand silhouette from the bones + palm and re-draw the camera through it.
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const PALM = [0, 1, 5, 9, 13, 17];
+const hm = document.createElement('canvas'), hc = hm.getContext('2d');
+function drawHandsFront(now) {
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
+  if (hm.width !== W || hm.height !== H) { hm.width = W; hm.height = H; }
+  hc.globalCompositeOperation = 'source-over'; hc.clearRect(0, 0, W, H);
+  hc.strokeStyle = '#fff'; hc.fillStyle = '#fff'; hc.lineCap = 'round'; hc.lineJoin = 'round';
+  let any = false;
+  for (const s of slots) {
+    if (!s.pts || now - s.seen > 250) continue;
+    any = true; const P = s.pts;
+    hc.lineWidth = s.size * .36; hc.beginPath();
+    BONES.forEach(([a, b]) => { hc.moveTo(P[a].x, P[a].y); hc.lineTo(P[b].x, P[b].y); });
+    hc.stroke();
+    hc.beginPath(); PALM.forEach((i, k) => k ? hc.lineTo(P[i].x, P[i].y) : hc.moveTo(P[i].x, P[i].y)); hc.closePath(); hc.fill(); hc.stroke();
+  }
+  if (!any) return;
+  hc.globalCompositeOperation = 'source-in';
+  const k = Math.max(W / vw, H / vh), dw = vw * k, dh = vh * k;
+  hc.save(); hc.translate(W, 0); hc.scale(-1, 1);
+  hc.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh); hc.restore();
+  ctx.drawImage(hm, 0, 0, W, H);
+}
+
 let last = performance.now(), frames = 0, fpsT = last, detT = last;
 function frame(now) {
   const dt = Math.min((now - last) / 1000, .1); last = now;
@@ -426,10 +480,10 @@ function frame(now) {
   } else for (const s of slots) {
     const e = ease(s.open); if (!e) continue;
     ctx.globalCompositeOperation = 'lighter';
-    if (sel === 0) { const R = s.size * 2.4 * e; drawWeapons(s, t, R, e); drawMandala(s, t, R, e); ringSparks(s, R, Math.round(5 * e)); }
+    if (sel === 0) { const R = s.size * 2.4 * e; halo(s.x, s.y, R, .4 * e); drawWeapons(s, t, R, e); drawMandala(s, t, R, e); ringSparks(s, R, Math.round(5 * e)); }
     else if (sel === 1) { const R = s.size * 3.4 * e; drawPortal(s, t, e, R); ringSparks(s, R * 1.02, Math.round(12 * e)); }
     else if (sel === 2) { drawMirror(s, t, e); }
-    else { const R = s.size * 2.8 * e; drawTime(s, t, R, e); timeSparks(s, R, Math.round(5 * e)); }
+    else { const R = s.size * 2.8 * e; halo(s.x, s.y, R, .4 * e); drawTime(s, t, R, e); timeSparks(s, R, Math.round(5 * e)); }
     ctx.globalCompositeOperation = 'source-over';
   }
 
@@ -444,6 +498,7 @@ function frame(now) {
   }
   sparks = kept; ctx.globalCompositeOperation = 'source-over';
 
+  if (twin.open > .02) drawHandsFront(now);
   if (recOn) recFrame();
   statusEl.textContent = anyOpen ? (twin.open > .3 ? 'Sling Ring ขนาดใหญ่' : POW[sel].n) : anyHand ? `เลือก: ${POW[sel].n} · กำมือเพื่อร่าย` : 'ยื่นมือเข้ามาในกล้อง';
   requestAnimationFrame(frame);
